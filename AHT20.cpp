@@ -1,53 +1,218 @@
-#ifndef AHT20_H
-#define AHT20_H
-#include "Arduino.h"
-#include "Wire.h"
+#include <AHT20.h>
 
-#define BME280_ADDRESS (0x77);
-#define BME280_ADDRESS_ADD (0x76);
-// DIA CHI CUA AHT20
-#define AHT20_ADDRESS 0x38
-
-enum RESSTER
-{ /// DOC DIA CHI OW THANH GHI
-
-    sfe_aht20_reg_reset = 0xBA,
-    sfe_aht20_reg_initialize = 0xBE,
-    sfe_aht20_reg_measure = 0xAC,
-};
-class AHT20
+AHT20 ::AHT20(const uint8_t deviceADDRESS)
 {
-private:
-    uint8_t _deviceADDRESS;
-    bool StartMeasur = false;
-    struct
+    _deviceADDRESS = deviceADDRESS;
+}
+bool AHT20 ::begin()
+{
+    if (isConnected() == false)
+    
+        return false;
+        delay(50);
+
+        if (isCalibrated() == false)
+        {
+            // send bit 0XBE000
+            triggerMeasurement();
+            delay(80);
+            uint8_t counter = 0;
+            while (isBusy())
+            {
+                delay(1);
+                if (counter++ > 100)
+                    return (false);
+            }
+            if (isCalibrated() == false)
+            {
+                return (false);
+            }
+        }
+        /// check bit has been set
+        if (isCalibrated() == false)
+            return false;
+
+        // Mark all datums as fresh (not read before)
+        SENSORQUER.TEMP = true;
+        SENSORQUER.HUMI = true;
+
+        return true;
+    }
+
+/// I2C ADDRESS
+bool AHT20 ::isConnected()
+{
+    Wire.beginTransmission(_deviceADDRESS);
+    if (Wire.endTransmission() == 0)
     {
-        uint32_t TEMP;
-        uint32_t HUMI;
+        return true;
+    }
 
-    } SENSORDATA;
-    struct
+    // If IC failed to respond, give it 20ms more for Power On Startup
+    // Datasheet pg 7
+    delay(20);
+
+    Wire.beginTransmission(_deviceADDRESS);
+    if (Wire.endTransmission() == 0)
     {
-        uint8_t TEMP : 1;
-        uint8_t HUMI : 1;
-    } SENSORQUER;
+        return true;
+    }
+    return false;
+}
+uint8_t AHT20::GetStatus()
+{
+    Wire.requestFrom(_deviceADDRESS, (uint8_t)1);
+    if (Wire.available())
+        return (Wire.read());
+    return (0);
+}
 
-public:
-    explicit AHT20(const u_int8_t deviceADD = AHT20_ADDRESS);
-    bool begin();
-    bool isConnected(); // kiem tra xem da ket noi voi aht20 chua
-    bool available();   // neu dung thi tra ve data moi
-    //// HAM DO LUONG
-    uint8_t GetStatus();
-    bool isCalibrated();       // Trả về true nếu bit cal được đặt, nếu không thì trả về false
-    bool isBusy();             // Returns true if the busy bit is set, false otherwise
-    bool initialize();         // Initialize for taking measurement
-    bool triggerMeasurement(); // Trigger the AHT20 to take a measurement
-    void readData();           // Read and parse the 6 bytes of data into raw humidity and temp
-    bool softReset();          // Restart the sensor system without turning power off and on
-    // doc dem am nhiet do
-    float GetTEMP();
-    float GetHUMI();
-};
+//Returns the state of the cal bit in the status byte
+bool AHT20::isCalibrated()
+{
+    return (GetStatus() & (1 << 3));
+}
 
-#endif
+//Returns the state of the busy bit in the status byte
+bool AHT20::isBusy()
+{
+    return (GetStatus() & (1 << 7));
+}
+
+bool AHT20::initialize()
+{
+    Wire.beginTransmission(_deviceADDRESS);
+    Wire.write(sfe_aht20_reg_initialize);
+    Wire.write((uint8_t)0x08);
+    Wire.write((uint8_t)0x00);
+    if (Wire.endTransmission() == 0)
+        return true;
+    return false;
+}
+
+bool AHT20 :: triggerMeasurement(){
+   Wire.beginTransmission(_deviceADDRESS);
+    Wire.write(sfe_aht20_reg_measure);
+    Wire.write((uint8_t)0x33);
+    Wire.write((uint8_t)0x00);
+    if (Wire.endTransmission() == 0)
+        return true;
+    return false;
+}
+void AHT20::readData()
+{
+    //Clear previous data
+    SENSORDATA.TEMP = 0;
+    SENSORDATA.HUMI = 0;
+
+    if (Wire.requestFrom( _deviceADDRESS, (uint8_t)6) > 0)
+    {
+        Wire.read(); // Read and discard state
+
+        uint32_t incoming = 0;
+        incoming |= (uint32_t)Wire.read() << (8 * 2);
+        incoming |= (uint32_t)Wire.read() << (8 * 1);
+        uint8_t midByte = Wire.read();
+
+        incoming |= midByte;
+        SENSORDATA.HUMI = incoming >> 4;
+
+        SENSORDATA.TEMP = (uint32_t)midByte << (8 * 2);
+        SENSORDATA.TEMP |= (uint32_t)Wire.read() << (8 * 1);
+        SENSORDATA.TEMP |= (uint32_t)Wire.read() << (8 * 0);
+
+        //Need to get rid of data in bits > 20
+        SENSORDATA.TEMP = SENSORDATA.TEMP & ~(0xFFF00000);
+
+        //Mark data as fresh
+        SENSORQUER.TEMP = false;
+        SENSORQUER.HUMI = false;
+    }
+}
+bool AHT20::available()
+{
+    if (StartMeasur == false)
+    {
+        triggerMeasurement();
+        StartMeasur = true;
+        return (false);
+    }
+
+    if (isBusy() == true)
+    {
+        return (false);
+    }
+
+    readData();
+    StartMeasur= false;
+    return (true);
+}
+
+bool AHT20::softReset()
+{
+    Wire.beginTransmission( _deviceADDRESS);
+    Wire.write(sfe_aht20_reg_reset);
+    if (Wire.endTransmission() == 0)
+        return true;
+    return false;
+}
+
+/*------------------------- Make Measurements ----------------------------*/
+
+float AHT20::GetTEMP()
+{
+    if (SENSORQUER.TEMP == true)
+    {
+        //We've got old data so trigger new measurement
+        triggerMeasurement();
+
+        delay(75); //Wait for measurement to complete
+
+        uint8_t counter = 0;
+        while (isBusy())
+        {
+            delay(1);
+            if (counter++ > 100)
+                return (false); //Give up after 100ms
+        }
+
+        readData();
+    }
+
+    //From datasheet pg 8
+    float tempCelsius = ((float)SENSORDATA.TEMP / 1048576) * 200 - 50;
+
+    //Mark data as old
+ SENSORQUER.TEMP = true;
+
+    return tempCelsius;
+}
+
+float AHT20::GetHUMI()
+{
+    if (SENSORQUER.HUMI == true)
+    {
+        //We've got old data so trigger new measurement
+        triggerMeasurement();
+
+        delay(75); //Wait for measurement to complete
+
+        uint8_t counter = 0;
+        while (isBusy())
+        {
+            delay(1);
+            if (counter++ > 100)
+                return (false); //Give up after 100ms
+        }
+
+        readData();
+    }
+
+    //From datasheet pg 8
+    float relHumidity = ((float)SENSORDATA.HUMI / 1048576) * 100;
+
+    //Mark data as old
+    SENSORQUER.HUMI = true;
+
+    return relHumidity;
+}
